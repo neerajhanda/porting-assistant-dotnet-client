@@ -16,6 +16,7 @@ namespace PortingAssistantExtensionTelemetry
         private static string _filePath;
         private static ILogger _logger;
         private static ReaderWriterLockSlim _readWriteLock = new ReaderWriterLockSlim();
+        private static JsonSerializer _serializer = new JsonSerializer();
 
         public static void Builder(ILogger logger, string filePath)
         {
@@ -40,7 +41,7 @@ namespace PortingAssistantExtensionTelemetry
             _logger = logConfiguration.CreateLogger();
         }
 
-        private static void WriteToFile(string content)
+        private static void WriteToFile<T>(T t)
         {
             _readWriteLock.EnterWriteLock();
             try
@@ -49,11 +50,15 @@ namespace PortingAssistantExtensionTelemetry
                 {
                     ConfigureDefault();
                 }
-                using (StreamWriter sw = File.AppendText(_filePath))
+
+                using StreamWriter sw = File.AppendText(_filePath);
+                using (JsonWriter writer = new JsonTextWriter(sw))
                 {
-                    sw.WriteLine(content);
-                    sw.Close();
+                    _serializer.Serialize(writer, t);
+                    sw.WriteLine();
+                    writer.Close();
                 }
+                sw.Close();
             }
             catch (Exception ex)
             {
@@ -68,11 +73,12 @@ namespace PortingAssistantExtensionTelemetry
 
         public static void Collect<T>(T t)
         {
-            WriteToFile(JsonConvert.SerializeObject(t));
+            WriteToFile(t);
         }
 
-        public static SolutionMetrics createSolutionMetric(SolutionDetails solutionDetail, string targetFramework, string version, string source, double analysisTime, string tag, SHA256 sha256hash, DateTime date) {
-            
+        public static SolutionMetrics createSolutionMetric(SolutionDetails solutionDetail, string targetFramework, string version, string source, double analysisTime, string tag, SHA256 sha256hash, DateTime date)
+        {
+
             return new SolutionMetrics
             {
                 metricsType = MetricsType.solution,
@@ -90,8 +96,8 @@ namespace PortingAssistantExtensionTelemetry
             };
         }
 
-        public static ProjectMetrics createProjectMetric(ProjectDetails project, string targetFramework, string version, string source, double analysisTime, string tag, SHA256 sha256hash, DateTime date
-            ) {
+        public static ProjectMetrics createProjectMetric(ProjectDetails project, string targetFramework, string version, string source, double analysisTime, string tag, SHA256 sha256hash, DateTime date)
+        {
             return new ProjectMetrics
             {
                 metricsType = MetricsType.project,
@@ -109,10 +115,11 @@ namespace PortingAssistantExtensionTelemetry
                 isBuildFailed = project.IsBuildFailed,
                 language = GetProjectLanguage(project.ProjectFilePath)
             };
-            
+
         }
 
-        public static NugetMetrics createNugetMetric(string targetFramework, string version, string source, double analysisTime, string tag, DateTime date, string packageId, string packageVersion, Compatibility compatibility) {
+        public static NugetMetrics createNugetMetric(string targetFramework, string version, string source, double analysisTime, string tag, DateTime date, string packageId, string packageVersion, Compatibility compatibility)
+        {
             return new NugetMetrics
             {
                 metricsType = MetricsType.nuget,
@@ -128,7 +135,7 @@ namespace PortingAssistantExtensionTelemetry
         }
 
         public static APIMetrics createAPIMetric(ApiAnalysisResult apiAnalysisResult, string targetFramework, string version, string source, string tag, DateTime date)
-        { 
+        {
             return new APIMetrics
             {
                 metricsType = MetricsType.api,
@@ -181,7 +188,6 @@ namespace PortingAssistantExtensionTelemetry
             });
         }
 
-
         public static void FileAssessmentCollect(SourceFileAnalysisResult result, string targetFramework, string version, string source, string tag)
         {
             var date = DateTime.Now;
@@ -193,23 +199,14 @@ namespace PortingAssistantExtensionTelemetry
         }
 
         private static string GetHash(HashAlgorithm hashAlgorithm, string input)
-
         {
-
             byte[] data = hashAlgorithm.ComputeHash(Encoding.UTF8.GetBytes(input));
-
             var sBuilder = new StringBuilder();
-
             for (int i = 0; i < data.Length; i++)
-
             {
-
                 sBuilder.Append(data[i].ToString("x2"));
-
             }
-
             return sBuilder.ToString();
-
         }
 
         private static string GetProjectLanguage(string projectFilePath)
