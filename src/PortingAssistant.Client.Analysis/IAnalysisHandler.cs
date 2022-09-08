@@ -1,4 +1,5 @@
-﻿using System.Collections.Generic;
+﻿using System;
+using System.Collections.Generic;
 using System.Threading.Tasks;
 using Codelyzer.Analysis;
 using Codelyzer.Analysis.Model;
@@ -7,7 +8,7 @@ using PortingAssistant.Client.Model;
 
 namespace PortingAssistant.Client.Analysis
 {
-    public interface IPortingAssistantAnalysisHandler
+    public interface IPortingAssistantAnalysisHandler:IDisposable
     {
         Task<Dictionary<string, ProjectAnalysisResult>> AnalyzeSolution(string solutionFilename, List<string> projects, string targetFramework = "net6.0");
 

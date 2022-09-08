@@ -1,6 +1,7 @@
 ﻿using Microsoft.Extensions.Logging;
 using PortingAssistant.Client.Model;
 using PortingAssistant.Client.NuGet.Interfaces;
+using PortingAssistant.Client.NuGet.Utils;
 
 namespace PortingAssistant.Client.NuGet
 {
@@ -9,7 +10,7 @@ namespace PortingAssistant.Client.NuGet
         public override PackageSourceType CompatibilityCheckerType => PackageSourceType.SDK;
 
         public SdkCompatibilityChecker(
-            IHttpService httpService,
+            S3CachedHttpService httpService,
             ILogger<ExternalCompatibilityChecker> logger)
             : base(httpService, logger)
         {

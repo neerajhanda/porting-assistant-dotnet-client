@@ -14,13 +14,14 @@ using System.Text.Json;
 using PortingAssistant.Client.Telemetry;
 using System.Diagnostics;
 using System.Reflection;
+using Codelyzer.Analysis.Build;
 
 namespace PortingAssistant.Client.CLI
 
 {
     class Program
     {
-        static void Main(string[] args)
+        static async Task Main(string[] args)
         {
             PortingAssistantCLI cli = new PortingAssistantCLI();
             cli.HandleCommand(args);
@@ -70,7 +71,7 @@ namespace PortingAssistant.Client.CLI
                         logConfig.SetMinimumLevel(LogLevel.Debug)
                         .AddSerilog(logger: Log.Logger, dispose: true));
 
-                    var portingAssistantClient = portingAssistantBuilder.GetPortingAssistant();
+                    using var portingAssistantClient = portingAssistantBuilder.GetPortingAssistant();
                     var reportExporter = portingAssistantBuilder.GetReportExporter();
                     var solutionSettings = cli.IgnoreProjects != null && cli.IgnoreProjects.Count != 0
                         ? new AnalyzerSettings
@@ -87,15 +88,16 @@ namespace PortingAssistant.Client.CLI
                     var startTime = DateTime.Now;
                     Task<SolutionAnalysisResult> analyzeResults;
 
-                    if (solutionSettings.UseGenerator)
+                    //if (solutionSettings.UseGenerator)
                     {
                         analyzeResults = AnalyzeSolutionGenerator(portingAssistantClient, cli.SolutionPath, solutionSettings);
-                    }
-                    else
-                    {
-                        analyzeResults = portingAssistantClient.AnalyzeSolutionAsync(cli.SolutionPath, solutionSettings);
                         analyzeResults.Wait();
                     }
+                    //else
+                    //{
+                    //    analyzeResults = portingAssistantClient.AnalyzeSolutionAsync(cli.SolutionPath, solutionSettings);
+                    //    analyzeResults.Wait();
+                    //}
                     if (analyzeResults.IsCompletedSuccessfully)
                     {
                         reportExporter.GenerateJsonReport(analyzeResults.Result, cli.OutputPath);
@@ -169,13 +171,14 @@ namespace PortingAssistant.Client.CLI
 
         private static async Task<SolutionAnalysisResult> AnalyzeSolutionGenerator(IPortingAssistantClient portingAssistantClient, string solutionPath, AnalyzerSettings solutionSettings)
         {
-            var projectAnalysisResults = new List<ProjectAnalysisResult>();
+            var projectAnalysisResults = new List<PortingAssistant.Client.Model.ProjectAnalysisResult>();
             var failedProjects = new List<string>();
-            var projectAnalysisResultEnumerator = portingAssistantClient.AnalyzeSolutionGeneratorAsync(solutionPath, solutionSettings).GetAsyncEnumerator();
+            //var projectAnalysisResultEnumerator = portingAssistantClient.AnalyzeSolutionGeneratorAsync(solutionPath, solutionSettings).GetAsyncEnumerator();
+            var results =
+                portingAssistantClient.AnalyzeSolutionGeneratorAsync(solutionPath, solutionSettings);
 
-            while (await projectAnalysisResultEnumerator.MoveNextAsync().ConfigureAwait(false))
+            await foreach (var result in results)
             {
-                var result = projectAnalysisResultEnumerator.Current;
                 projectAnalysisResults.Add(result);
 
                 if (result.IsBuildFailed)
@@ -183,6 +186,17 @@ namespace PortingAssistant.Client.CLI
                     failedProjects.Add(result.ProjectFilePath);
                 }
             }
+
+            //while (await projectAnalysisResultEnumerator.MoveNextAsync().ConfigureAwait(false))
+            //{
+            //    var result = projectAnalysisResultEnumerator.Current;
+            //    projectAnalysisResults.Add(result);
+
+            //    if (result.IsBuildFailed)
+            //    {
+            //        failedProjects.Add(result.ProjectFilePath);
+            //    }
+            //}
 
 
             var solutionDetails = new SolutionDetails

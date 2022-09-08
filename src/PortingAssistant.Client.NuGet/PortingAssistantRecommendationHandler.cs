@@ -9,14 +9,15 @@ using Newtonsoft.Json;
 using System.IO;
 using PortingAssistant.Client.NuGet.Interfaces;
 using Newtonsoft.Json.Linq;
+using PortingAssistant.Client.NuGet.Utils;
 
 namespace PortingAssistant.Client.NuGet
 {
     public class PortingAssistantRecommendationHandler : IPortingAssistantRecommendationHandler
     {
         private readonly ILogger _logger;
-        private readonly IHttpService _httpService;
-        private static readonly int _maxProcessConcurrency = 3;
+        private readonly ICachedHttpService _httpService;
+        private static readonly int _maxProcessConcurrency = 10;
         private static readonly SemaphoreSlim _semaphore = new SemaphoreSlim(_maxProcessConcurrency);
         private const string RecommendationLookupFile = "namespaces.recommendation.lookup.json";
         private Dictionary<string, string> _manifest;
@@ -25,7 +26,7 @@ namespace PortingAssistant.Client.NuGet
 
 
         public PortingAssistantRecommendationHandler(
-            IHttpService httpService,
+            GitHubCachedHttpService httpService,
             ILogger<PortingAssistantRecommendationHandler> logger
             )
         {
@@ -106,17 +107,36 @@ namespace PortingAssistant.Client.NuGet
                     try
                     {
                         _logger.LogInformation("Downloading {0} from {1}", url.Key, CompatibilityCheckerType);
-                        using var stream = await _httpService.DownloadGitHubFileAsync("recommendation/" + url.Key);
-
-                        using var streamReader = new StreamReader(stream);
-                        var packageFromGithub = JsonConvert.DeserializeObject<RecommendationDetails>(streamReader.ReadToEnd());
-
-                        foreach (var @namespace in url.Value)
+                        var filePath = $"recommendation/{url.Key}";
+                        bool fileExists = await _httpService.DoesFileExistAsync(filePath);
+                        if (fileExists)
                         {
-                            if (recommendationTaskCompletionSources.TryGetValue(@namespace, out var taskCompletionSource))
+                            await using var stream = await _httpService.DownloadFileAsync(filePath);
+
+                            using var streamReader = new StreamReader(stream);
+                            var packageFromGithub =
+                                JsonConvert.DeserializeObject<RecommendationDetails>(streamReader.ReadToEnd());
+
+                            foreach (var @namespace in url.Value)
                             {
-                                taskCompletionSource.SetResult(packageFromGithub);
-                                namespacesFound.Add(@namespace);
+                                if (recommendationTaskCompletionSources.TryGetValue(@namespace,
+                                        out var taskCompletionSource))
+                                {
+                                    taskCompletionSource.SetResult(packageFromGithub);
+                                    namespacesFound.Add(@namespace);
+                                }
+                            }
+                        }
+                        else
+                        {
+                            _logger.LogError("Failed when downloading recommendation and parsing {0} from {1}, {2}", url.Key, CompatibilityCheckerType);
+                            foreach (var @namespace in url.Value)
+                            {
+                                if (recommendationTaskCompletionSources.TryGetValue(@namespace, out var taskCompletionSource))
+                                {
+                                    taskCompletionSource.SetException(new PortingAssistantClientException(ExceptionMessage.NamespaceFailedToProcess(@namespace), new Exception("Download failed")));
+                                    namespacesWithErrors.Add(@namespace);
+                                }
                             }
                         }
                     }
@@ -173,9 +193,10 @@ namespace PortingAssistant.Client.NuGet
 
         private async Task<Dictionary<string, string>> GetManifestAsync()
         {
-            using var stream = await _httpService.DownloadGitHubFileAsync("data/" + RecommendationLookupFile);
+            using var stream = await _httpService.DownloadFileAsync("data/" + RecommendationLookupFile);
             using var streamReader = new StreamReader(stream);
             return JsonConvert.DeserializeObject<JObject>(streamReader.ReadToEnd()).ToObject<Dictionary<string, string>>();
         }
+
     }
 }

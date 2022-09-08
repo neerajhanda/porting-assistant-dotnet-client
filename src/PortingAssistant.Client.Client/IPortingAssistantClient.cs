@@ -1,4 +1,5 @@
-﻿using System.Collections.Generic;
+﻿using System;
+using System.Collections.Generic;
 using System.Threading.Tasks;
 using Codelyzer.Analysis;
 using Codelyzer.Analysis.Model;
@@ -7,7 +8,7 @@ using PortingAssistant.Client.Model;
 
 namespace PortingAssistant.Client.Client
 {
-    public interface IPortingAssistantClient
+    public interface IPortingAssistantClient:IDisposable
     {
         Task<SolutionAnalysisResult> AnalyzeSolutionAsync(string solutionFilePath, AnalyzerSettings settings);
         IAsyncEnumerable<ProjectAnalysisResult> AnalyzeSolutionGeneratorAsync(string solutionFilePath, AnalyzerSettings settings);

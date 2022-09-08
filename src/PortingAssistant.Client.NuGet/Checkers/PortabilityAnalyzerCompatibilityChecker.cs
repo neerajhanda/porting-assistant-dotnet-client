@@ -11,6 +11,7 @@ using PortingAssistant.Client.Model;
 using Newtonsoft.Json.Linq;
 using Amazon.S3;
 using PortingAssistant.Client.NuGet.Interfaces;
+using PortingAssistant.Client.NuGet.Utils;
 
 namespace PortingAssistant.Client.NuGet
 {
@@ -21,9 +22,9 @@ namespace PortingAssistant.Client.NuGet
     {
         private const string NamespaceLookupFile = "microsoftlibs.namespace.lookup.json";
         private readonly ILogger _logger;
-        private readonly IHttpService _httpService;
+        private readonly ICachedHttpService _httpService;
         private Dictionary<string, string> _manifest;
-        private static readonly int _maxProcessConcurrency = 3;
+        private static readonly int _maxProcessConcurrency = 10;
         private static readonly SemaphoreSlim _semaphore = new SemaphoreSlim(_maxProcessConcurrency);
 
         public PackageSourceType CompatibilityCheckerType => PackageSourceType.PORTABILITY_ANALYZER;
@@ -34,7 +35,7 @@ namespace PortingAssistant.Client.NuGet
         /// <param name="httpService">The transferUtility object to read data from S3</param>
         /// <param name="logger">Logger object</param>
         public PortabilityAnalyzerCompatibilityChecker(
-            IHttpService httpService,
+            S3CachedHttpService httpService,
             ILogger<PortabilityAnalyzerCompatibilityChecker> logger
             )
         {
@@ -134,7 +135,7 @@ namespace PortingAssistant.Client.NuGet
                 try
                 {
                     _logger.LogInformation("Downloading {0} from {1}", url.Key, CompatibilityCheckerType);
-                    using var stream = await _httpService.DownloadS3FileAsync(url.Key);
+                    using var stream = await _httpService.DownloadFileAsync(url.Key);
                     using var gzipStream = new GZipStream(stream, CompressionMode.Decompress);
                     using var streamReader = new StreamReader(gzipStream);
                     var packageFromS3 = JsonConvert.DeserializeObject<PackageFromS3>(streamReader.ReadToEnd());
@@ -194,7 +195,7 @@ namespace PortingAssistant.Client.NuGet
 
         private async Task<Dictionary<string, string>> GetManifestAsync()
         {
-            using var stream = await _httpService.DownloadS3FileAsync(NamespaceLookupFile);
+            using var stream = await _httpService.DownloadFileAsync(NamespaceLookupFile);
             using var streamReader = new StreamReader(stream);
             var result = streamReader.ReadToEnd();
             return JsonConvert.DeserializeObject<JObject>(result).ToObject<Dictionary<string, string>>();

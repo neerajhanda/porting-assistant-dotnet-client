@@ -2,6 +2,7 @@
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Net.Http;
 using System.Threading.Tasks;
 using CTA.Rules.Models;
 using CTA.Rules.PortCore;
@@ -17,6 +18,7 @@ using AnalyzerConfiguration = Codelyzer.Analysis.AnalyzerConfiguration;
 using IDEProjectResult = Codelyzer.Analysis.Build.IDEProjectResult;
 using PortingAssistant.Client.Common.Model;
 using Codelyzer.Analysis.Analyzer;
+using CTA.Rules.Common.Helpers;
 
 namespace PortingAssistant.Client.Analysis
 {
@@ -25,15 +27,17 @@ namespace PortingAssistant.Client.Analysis
         private readonly ILogger<PortingAssistantAnalysisHandler> _logger;
         private readonly IPortingAssistantNuGetHandler _handler;
         private readonly IPortingAssistantRecommendationHandler _recommendationHandler;
+        private readonly RecommendationsCachedHttpService _httpService;
 
         private const string DEFAULT_TARGET = "net6.0";
 
         public PortingAssistantAnalysisHandler(ILogger<PortingAssistantAnalysisHandler> logger,
-            IPortingAssistantNuGetHandler handler, IPortingAssistantRecommendationHandler recommendationHandler)
+            IPortingAssistantNuGetHandler handler, IPortingAssistantRecommendationHandler recommendationHandler, RecommendationsCachedHttpService httpService)
         {
             _logger = logger;
             _handler = handler;
             _recommendationHandler = recommendationHandler;
+            _httpService = httpService;
         }
 
         private async Task<List<AnalyzerResult>> RunCoderlyzerAnalysis(string solutionFilename, List<string> projects)
@@ -45,7 +49,7 @@ namespace PortingAssistant.Client.Analysis
 
             var configuration = GetAnalyzerConfiguration(projects);
             CodeAnalyzerByLanguage analyzer = new CodeAnalyzerByLanguage(configuration, _logger);
-            
+
             var analyzerResults = await analyzer.AnalyzeSolution(solutionFilename);
 
             _logger.LogInformation("Memory usage after RunCoderlyzerAnalysis: ");
@@ -289,9 +293,11 @@ namespace PortingAssistant.Client.Analysis
             var configuration = GetAnalyzerConfiguration(projects);
             CodeAnalyzerByLanguage analyzer = new CodeAnalyzerByLanguage(configuration, _logger);
             var resultEnumerator = analyzer.AnalyzeSolutionGeneratorAsync(solutionFilename).GetAsyncEnumerator();
+            Dictionary<string, ProjectAnalysisResult> projectAnalysisResults =
+                new Dictionary<string, ProjectAnalysisResult>();
             try
             {
-                SolutionPort solutionPort = new SolutionPort(solutionFilename);
+                //SolutionPort solutionPort = new SolutionPort(solutionFilename);
 
                 while (await resultEnumerator.MoveNextAsync().ConfigureAwait(false))
                 {
@@ -305,16 +311,14 @@ namespace PortingAssistant.Client.Analysis
                         PortCode = false,
                         PortProject = false
                     };
-
-                    var projectResult = solutionPort.RunProject(result, projectConfiguration);
-
-                    var analysisActions = AnalyzeActions(new List<string> { projectPath }, targetFramework, new List<AnalyzerResult> { result }, solutionFilename);
-
-                    var analysisResult = AnalyzeProject(projectPath, solutionFilename, new List<AnalyzerResult> { result }, analysisActions, isIncremental: false, targetFramework);
-                    result.Dispose();
+                    //var projectResult = await solutionPort.RunProject(result, projectConfiguration);
+                    var analyzeActions =
+                        AnalyzeProjectActions(new AnalyzeActionsRequest(projectPath, targetFramework, result, solutionFilename, projectConfiguration));
+                    var analysisResult = AnalyzeProject(projectPath, solutionFilename, result, analyzeActions, isIncremental: true, targetFramework);
+                    result?.Dispose();
                     yield return analysisResult;
-
                 }
+
             }
             finally
             {
@@ -322,6 +326,142 @@ namespace PortingAssistant.Client.Analysis
             }
         }
 
+        private ProjectResult AnalyzeProjectActions(AnalyzeActionsRequest analyzeActionsRequest)
+        {
+            _logger.LogInformation("Memory Consumption before AnalyzeActions: ");
+            MemoryUtils.LogMemoryConsumption(_logger);
+            var projectPort = new ProjectPort(analyzeActionsRequest.AnalyzerResult,
+                analyzeActionsRequest.PortCoreConfiguration, _httpService);
+            var projectResult = projectPort.Run();
+
+            //var solutionPort = new SolutionPort(analyzeActionsRequest.PathToSolution, analyzerResults, configs, _logger);
+            //var projectResults = solutionPort.Run().ProjectResults.ToList();
+
+            _logger.LogInformation("Memory Consumption after AnalyzeActions: ");
+            MemoryUtils.LogMemoryConsumption(_logger);
+
+            return projectResult;
+        }
+
+        private ProjectAnalysisResult AnalyzeProject(
+            string project, string solutionFileName, AnalyzerResult analyzer, ProjectResult analysisActions, bool isIncremental = false, string targetFramework = DEFAULT_TARGET)
+        {
+            try
+            {
+                var projectFeatureType = analysisActions.FeatureType.ToString();
+
+                var projectActions = analysisActions.ProjectActions ?? new ProjectActions();
+
+                if (analyzer == null || analyzer.ProjectResult == null)
+                {
+                    _logger.LogError("Unable to build {0}.", project);
+                    return null;
+                }
+
+                var sourceFileToCodeTokens = analyzer.ProjectResult.SourceFileResults.Select((sourceFile) =>
+                {
+                    return SourceFileToCodeTokens(sourceFile);
+                }).ToDictionary(p => p.Key, p => p.Value);
+
+                var sourceFileToCodeEntityDetails = CodeEntityModelToCodeEntities.Convert(sourceFileToCodeTokens, analyzer);
+
+                var namespaces = sourceFileToCodeEntityDetails.Aggregate(new HashSet<string>(), (agg, cur) =>
+                {
+                    agg.UnionWith(cur.Value.Select(i => i.Namespace).Where(i => i != null));
+                    return agg;
+                });
+
+                var targetframeworks = analyzer.ProjectResult.TargetFrameworks.Count == 0 ?
+                    new List<string> { analyzer.ProjectResult.TargetFramework } : analyzer.ProjectResult.TargetFrameworks;
+
+                var nugetPackages = analyzer.ProjectResult.ExternalReferences.NugetReferences
+                    .Select(r => CodeEntityModelToCodeEntities.ReferenceToPackageVersionPair(r))
+                    .ToHashSet();
+                var nugetPackageNameLookup = nugetPackages.Select(package => package.PackageId).ToHashSet();
+
+                var subDependencies = analyzer.ProjectResult.ExternalReferences.NugetDependencies
+                    .Select(r => CodeEntityModelToCodeEntities.ReferenceToPackageVersionPair(r))
+                    .ToHashSet();
+
+                var sdkPackages = namespaces.Select(n => new PackageVersionPair
+                {
+                    PackageId = n,
+                    Version = "0.0.0",
+                    PackageSourceType = PackageSourceType.SDK
+                })
+                    .Where(pair =>
+                        !string.IsNullOrEmpty(pair.PackageId) &&
+                        !nugetPackageNameLookup.Contains(pair.PackageId));
+
+                var allPackages = nugetPackages
+                    .Union(subDependencies)
+                    .Union(sdkPackages)
+                    .ToList();
+
+                Dictionary<PackageVersionPair, Task<PackageDetails>> packageResults;
+
+                packageResults = isIncremental ? _handler.GetNugetPackages(allPackages, solutionFileName, isIncremental: true, incrementalRefresh: true) : _handler.GetNugetPackages(allPackages, null, isIncremental: false, incrementalRefresh: false);
+
+                var recommendationResults = _recommendationHandler.GetApiRecommendation(namespaces.ToList());
+
+                var packageAnalysisResults = nugetPackages.Select(package =>
+                {
+                    var result = PackageCompatibility.IsCompatibleAsync(packageResults.GetValueOrDefault(package, null), package, _logger, targetFramework);
+                    var packageAnalysisResult = PackageCompatibility.GetPackageAnalysisResult(result, package, targetFramework);
+                    return new Tuple<PackageVersionPair, Task<PackageAnalysisResult>>(package, packageAnalysisResult);
+                }).ToDictionary(t => t.Item1, t => t.Item2);
+
+                var portingActionResults = ProjectActionsToRecommendedActions.Convert(projectActions);
+
+                var SourceFileAnalysisResults = CodeEntityModelToCodeEntities.AnalyzeResults(
+                    sourceFileToCodeEntityDetails, packageResults, recommendationResults, portingActionResults, targetFramework);
+                var compatibilityResults = AnalysisUtils.GenerateCompatibilityResults(SourceFileAnalysisResults, analyzer.ProjectResult.ProjectFilePath, analyzer.ProjectBuildResult?.PrePortCompilation != null);
+
+                return new ProjectAnalysisResult
+                {
+                    ProjectName = analyzer.ProjectResult.ProjectName,
+                    ProjectFilePath = analyzer.ProjectResult.ProjectFilePath,
+                    TargetFrameworks = targetframeworks,
+                    PackageReferences = nugetPackages.ToList(),
+                    ProjectReferences = analyzer.ProjectResult.ExternalReferences.ProjectReferences.ConvertAll(p => new ProjectReference { ReferencePath = p.AssemblyLocation }),
+                    PackageAnalysisResults = packageAnalysisResults,
+                    IsBuildFailed = analyzer.ProjectResult.IsBuildFailed() || analyzer.ProjectBuildResult.IsSyntaxAnalysis,
+                    Errors = analyzer.ProjectResult.BuildErrors,
+                    ProjectGuid = analyzer.ProjectResult.ProjectGuid,
+                    ProjectType = analyzer.ProjectResult.ProjectType,
+                    FeatureType = projectFeatureType,
+                    SourceFileAnalysisResults = SourceFileAnalysisResults,
+                    MetaReferences = analyzer.ProjectBuildResult.Project.MetadataReferences.Select(m => m.Display).ToList(),
+                    PreportMetaReferences = analyzer.ProjectBuildResult.PreportReferences,
+                    ProjectRules = projectActions.ProjectRules,
+                    VisualBasicProjectRules = projectActions.VbProjectRules,
+                    ExternalReferences = analyzer.ProjectResult.ExternalReferences,
+                    ProjectCompatibilityResult = compatibilityResults
+                };
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError("Error while analyzing {0}, {1}", project, ex);
+                return new ProjectAnalysisResult
+                {
+                    ProjectName = Path.GetFileNameWithoutExtension(project),
+                    ProjectFilePath = project,
+                    TargetFrameworks = new List<string>(),
+                    PackageReferences = new List<PackageVersionPair>(),
+                    ProjectReferences = new List<ProjectReference>(),
+                    PackageAnalysisResults = new Dictionary<PackageVersionPair, Task<PackageAnalysisResult>>(),
+                    IsBuildFailed = true,
+                    Errors = new List<string> { string.Format("Error while analyzing {0}, {1}", project, ex) },
+                    ProjectGuid = null,
+                    ProjectType = null,
+                    SourceFileAnalysisResults = new List<SourceFileAnalysisResult>()
+                };
+            }
+            finally
+            {
+                CommonUtils.RunGarbageCollection(_logger, "PortingAssistantAnalysisHandler.AnalyzeProject");
+            }
+        }
         private List<ProjectResult> AnalyzeActions(List<string> projects, string targetFramework, List<AnalyzerResult> analyzerResults, string pathToSolution)
         {
             _logger.LogInformation("Memory Consumption before AnalyzeActions: ");
@@ -447,11 +587,11 @@ namespace PortingAssistant.Client.Analysis
                     .ToHashSet();
 
                 var sdkPackages = namespaces.Select(n => new PackageVersionPair
-                    {
-                        PackageId = n,
-                        Version = "0.0.0",
-                        PackageSourceType = PackageSourceType.SDK
-                    })
+                {
+                    PackageId = n,
+                    Version = "0.0.0",
+                    PackageSourceType = PackageSourceType.SDK
+                })
                     .Where(pair =>
                         !string.IsNullOrEmpty(pair.PackageId) &&
                         !nugetPackageNameLookup.Contains(pair.PackageId));
@@ -482,7 +622,7 @@ namespace PortingAssistant.Client.Analysis
                 var SourceFileAnalysisResults = CodeEntityModelToCodeEntities.AnalyzeResults(
                     sourceFileToCodeEntityDetails, packageResults, recommendationResults, portingActionResults, targetFramework);
                 var compatibilityResults = AnalysisUtils.GenerateCompatibilityResults(SourceFileAnalysisResults, analyzer.ProjectResult.ProjectFilePath, analyzer.ProjectBuildResult?.PrePortCompilation != null);
-                
+
                 return new ProjectAnalysisResult
                 {
                     ProjectName = analyzer.ProjectResult.ProjectName,
@@ -528,7 +668,7 @@ namespace PortingAssistant.Client.Analysis
                 CommonUtils.RunGarbageCollection(_logger, "PortingAssistantAnalysisHandler.AnalyzeProject");
             }
         }
-        
+
         private AnalyzerConfiguration GetAnalyzerConfiguration(List<string> projects)
         {
             var language = LanguageOptions.CSharp;
@@ -551,6 +691,11 @@ namespace PortingAssistant.Client.Analysis
                     },
                 ConcurrentThreads = 1
             };
+        }
+
+        public void Dispose()
+        {
+            if (_handler != null) _handler.Dispose();
         }
     }
 }

@@ -12,52 +12,45 @@ using PortingAssistant.Client.NuGet.Utils;
 using System.IO.Compression;
 using Newtonsoft.Json;
 using System.Security.Cryptography;
+using PortingAssistant.Client.Common.Model;
 
 namespace PortingAssistant.Client.NuGet
 {
     public class ExternalCompatibilityChecker : ICompatibilityChecker
     {
         private readonly ILogger _logger;
-        private readonly IHttpService _httpService;
+        private readonly ICachedHttpService _httpService;
         private readonly IFileSystem _fileSystem;
-        private static readonly int _maxProcessConcurrency = 3;
-        private static readonly SemaphoreSlim _semaphore = new SemaphoreSlim(_maxProcessConcurrency);
+        private static readonly int _maxProcessConcurrency = 10;
+        private static readonly SemaphoreSlim _semaphore = new(_maxProcessConcurrency);
+        private static readonly HashSet<string> _filesNotFound = new HashSet<string>();
 
         public virtual PackageSourceType CompatibilityCheckerType => PackageSourceType.NUGET;
 
         public ExternalCompatibilityChecker(
-            IHttpService httpService,
+            S3CachedHttpService httpService,
             ILogger<ExternalCompatibilityChecker> logger,
             IFileSystem fileSystem = null)
         {
             _logger = logger;
             _httpService = httpService;
-            if (fileSystem != null)
-                _fileSystem = fileSystem;
-            else
-                _fileSystem = new FileSystem();
+            _fileSystem = fileSystem ?? new FileSystem();
         }
 
         public Dictionary<PackageVersionPair, Task<PackageDetails>> Check(
             IEnumerable<PackageVersionPair> packageVersions,
             string pathToSolution, bool isIncremental = false, bool refresh = false)
         {
-            var packagesToCheck = packageVersions;
+            List<PackageVersionPair> packagesToCheck = default;
 
-            if (CompatibilityCheckerType == PackageSourceType.SDK)
-            {
-                packagesToCheck = packageVersions.Where(package => package.PackageSourceType == PackageSourceType.SDK);
-            }
+            packagesToCheck = CompatibilityCheckerType == PackageSourceType.SDK ? packageVersions.Where(package => package.PackageSourceType == PackageSourceType.SDK).ToList() : packageVersions.ToList();
 
             var compatibilityTaskCompletionSources = packagesToCheck
-                .Select(packageVersion =>
-                {
-                    return new Tuple<PackageVersionPair, TaskCompletionSource<PackageDetails>>(packageVersion, new TaskCompletionSource<PackageDetails>());
-                })
+                .Select(package => new Tuple<PackageVersionPair, TaskCompletionSource<PackageDetails>>(package, new TaskCompletionSource<PackageDetails>()))
                 .ToDictionary(t => t.Item1, t => t.Item2);
 
             _logger.LogInformation("Checking {0} for compatibility of {1} package(s)", CompatibilityCheckerType, packagesToCheck.Count());
-            if (packagesToCheck.Any())
+            if (packagesToCheck.Count > 0)
             {
                 Task.Run(() =>
                 {
@@ -76,7 +69,7 @@ namespace PortingAssistant.Client.NuGet
             return compatibilityTaskCompletionSources.ToDictionary(t => t.Key, t => t.Value.Task);
         }
 
-        private async void ProcessCompatibility(IEnumerable<PackageVersionPair> packageVersions,
+        private async void ProcessCompatibility(List<PackageVersionPair> packageVersions,
             Dictionary<PackageVersionPair, TaskCompletionSource<PackageDetails>> compatibilityTaskCompletionSources,
             string pathToSolution, bool isIncremental, bool incrementalRefresh)
         {
@@ -102,9 +95,26 @@ namespace PortingAssistant.Client.NuGet
                         if (incrementalRefresh || !IsPackageInFile(fileToDownload, tempDirectoryPath))
                         {
                             _logger.LogInformation("Downloading {0} from {1}", fileToDownload, CompatibilityCheckerType);
-                            packageDetails = await GetPackageDetailFromS3(fileToDownload, _httpService);
-                            _logger.LogInformation("Caching {0} from {1} to Temp", fileToDownload, CompatibilityCheckerType);
-                            CachePackageDetailsToFile(fileToDownload, packageDetails, tempDirectoryPath);
+                            if (!_filesNotFound.Contains(fileToDownload))
+                            {
+                                var packageResponse = await GetPackageDetailFromS3(fileToDownload, _httpService);
+                                if (packageResponse.Success)
+                                {
+                                    packageDetails = packageResponse.PackageDetails;
+                                    _logger.LogInformation("Caching {0} from {1} to Temp", fileToDownload,
+                                        CompatibilityCheckerType);
+                                    CachePackageDetailsToFile(fileToDownload, packageDetails, tempDirectoryPath);
+                                }
+                                else
+                                {
+                                    _filesNotFound.Add(fileToDownload);
+                                    _logger.LogInformation("Failed to download {fileToDownload}");
+                                }
+                            }
+                            else
+                            {
+                                _logger.LogInformation("Skipping download {fileToDownload} based on historical failure");
+                            }
                         }
                         else
                         {
@@ -113,24 +123,55 @@ namespace PortingAssistant.Client.NuGet
                         }
                     }
                     else
-                        packageDetails = await GetPackageDetailFromS3(fileToDownload, _httpService);
-
-                    if (packageDetails.Name == null || !string.Equals(packageDetails.Name.Trim().ToLower(),
-                        packageToDownload.Trim().ToLower(), StringComparison.OrdinalIgnoreCase))
                     {
-                        throw new PackageDownloadMismatchException(
-                            actualPackage: packageDetails.Name,
-                            expectedPackage: packageToDownload);
+                        if (!_filesNotFound.Contains(fileToDownload))
+                        {
+                            var packageResponse = await GetPackageDetailFromS3(fileToDownload, _httpService);
+                            if (packageResponse.Success)
+                            {
+                                packageDetails = packageResponse.PackageDetails;
+                            }
+                            else
+                            {
+                                _filesNotFound.Add(fileToDownload);
+                                _logger.LogInformation("Failed to download {fileToDownload}");
+                            }
+                        }
+                        else
+                        {
+                            _logger.LogInformation("Skipping download {fileToDownload} based on historical failure");
+                        }
+                    }
+
+                    if (packageDetails != null)
+                    {
+                        if (packageDetails.Name == null || !string.Equals(packageDetails.Name.Trim().ToLower(),
+                                packageToDownload.Trim().ToLower(), StringComparison.OrdinalIgnoreCase))
+                        {
+                            throw new PackageDownloadMismatchException(
+                                actualPackage: packageDetails.Name,
+                                expectedPackage: packageToDownload);
+                        }
                     }
 
                     foreach (var packageVersion in groupedPackageVersions.Value)
                     {
-                        if (compatibilityTaskCompletionSources.TryGetValue(packageVersion, out var taskCompletionSource))
+                        if (compatibilityTaskCompletionSources.TryGetValue(packageVersion,
+                                out var taskCompletionSource))
                         {
-                            taskCompletionSource.SetResult(packageDetails);
-                            packageVersionsFound.Add(packageVersion);
+                            if (packageDetails != null)
+                            {
+                                taskCompletionSource.SetResult(packageDetails);
+                                packageVersionsFound.Add(packageVersion);
+                            }
+                            else
+                            {
+                                taskCompletionSource.SetException(new PortingAssistantClientException(ExceptionMessage.PackageNotFound(packageVersion), new ApplicationException("Download failure")));
+                                packageVersionsWithErrors.Add(packageVersion);
+                            }
                         }
                     }
+
                 }
                 catch (OutOfMemoryException ex)
                 {
@@ -228,14 +269,20 @@ namespace PortingAssistant.Client.NuGet
             string filePath = Path.Combine(_tempSolutionDirectory, fileToDownload);
             return _fileSystem.FileExists(filePath);
         }
-        public async Task<PackageDetails> GetPackageDetailFromS3(string fileToDownload, IHttpService httpService)
+        public async Task<S3PackageDetailsResponse> GetPackageDetailFromS3(string fileToDownload, ICachedHttpService httpService)
         {
-            using var stream = await httpService.DownloadS3FileAsync(fileToDownload);
-            using var gzipStream = new GZipStream(stream, CompressionMode.Decompress);
-            using var streamReader = new StreamReader(gzipStream);
-            var data = JsonConvert.DeserializeObject<PackageFromS3>(streamReader.ReadToEnd());
-            var packageDetails = data.Package ?? data.Namespaces;
-            return packageDetails;
+            var fileExists = await httpService.DoesFileExistAsync(fileToDownload);
+            if (fileExists)
+            {
+                await using var stream = await httpService.DownloadFileAsync(fileToDownload);
+                await using var gzipStream = new GZipStream(stream, CompressionMode.Decompress);
+                using var streamReader = new StreamReader(gzipStream);
+                var data = JsonConvert.DeserializeObject<PackageFromS3>(streamReader.ReadToEnd());
+                var packageDetails = data?.Package ?? data?.Namespaces;
+                return new S3PackageDetailsResponse(true, packageDetails);
+            }
+
+            return new S3PackageDetailsResponse(false);
         }
         public async void CachePackageDetailsToFile(string fileName, PackageDetails packageDetail, string _tempSolutionDirectory)
         {
@@ -244,9 +291,9 @@ namespace PortingAssistant.Client.NuGet
             _fileSystem.CreateDirectory(Path.GetDirectoryName(filePath));
 
             var data = JsonConvert.SerializeObject(packageDetail);
-            using Stream compressedFileStream = _fileSystem.FileOpenWrite(filePath);
-            using var gzipStream = new GZipStream(compressedFileStream, CompressionMode.Compress);
-            using var streamWriter = new StreamWriter(gzipStream);
+            await using Stream compressedFileStream = _fileSystem.FileOpenWrite(filePath);
+            await using var gzipStream = new GZipStream(compressedFileStream, CompressionMode.Compress);
+            await using var streamWriter = new StreamWriter(gzipStream);
             await streamWriter.WriteAsync(data);
         }
         public PackageDetails GetPackageDetailFromFile(string fileToDownload, string _tempSolutionDirectory)

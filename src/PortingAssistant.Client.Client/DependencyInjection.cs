@@ -10,6 +10,7 @@ using PortingAssistant.Client.NuGet.Utils;
 using System;
 using Polly;
 using System.Net.Http;
+using CTA.Rules.Common.Helpers;
 using Polly.Extensions.Http;
 
 namespace PortingAssistant.Client.Client
@@ -29,7 +30,10 @@ namespace PortingAssistant.Client.Client
             serviceCollection.AddTransient<ICompatibilityChecker, PortabilityAnalyzerCompatibilityChecker>();
             serviceCollection.AddTransient<IPortingHandler, PortingHandler>();
             serviceCollection.AddTransient<IPortingProjectFileHandler, PortingProjectFileHandler>();
-            serviceCollection.AddTransient<IHttpService, HttpService>();
+            //serviceCollection.AddTransient<IHttpService, HttpService>();
+            serviceCollection.AddTransient<S3CachedHttpService, S3CachedHttpService>();
+            serviceCollection.AddTransient<GitHubCachedHttpService, GitHubCachedHttpService>();
+            serviceCollection.AddSingleton<RecommendationsCachedHttpService,RecommendationsCachedHttpService>();
             serviceCollection.AddHttpClient("s3")
                 .SetHandlerLifetime(TimeSpan.FromMinutes(5))
                 .AddPolicyHandler(GetRetryPolicy());

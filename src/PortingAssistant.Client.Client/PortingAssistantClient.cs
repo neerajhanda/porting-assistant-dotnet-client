@@ -179,5 +179,10 @@ namespace PortingAssistant.Client.Client
                 .Select(p => p.AbsolutePath)
                 .ToList();
         }
+
+        public void Dispose()
+        {
+            if (_analysisHandler != null) _analysisHandler.Dispose();
+        }
     }
 }

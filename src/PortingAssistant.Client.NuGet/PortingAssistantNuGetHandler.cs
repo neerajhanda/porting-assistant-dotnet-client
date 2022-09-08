@@ -24,8 +24,8 @@ namespace PortingAssistant.Client.NuGet
             _compatibilityTaskCompletionSources = new ConcurrentDictionary<PackageVersionPair, TaskCompletionSource<PackageDetails>>();
         }
 
-        public Dictionary<PackageVersionPair, Task<PackageDetails>> GetNugetPackages(List<PackageVersionPair> packageVersions, string pathToSolution, 
-            bool isIncremental = false, bool incrementalRefresh = false )
+        public Dictionary<PackageVersionPair, Task<PackageDetails>> GetNugetPackages(List<PackageVersionPair> packageVersions, string pathToSolution,
+            bool isIncremental = false, bool incrementalRefresh = false)
         {
             _logger.LogInformation("Memory usage before GetNugetPackages: ");
             MemoryUtils.LogMemoryConsumption(_logger);
@@ -53,7 +53,7 @@ namespace PortingAssistant.Client.NuGet
 
         private async void Process(List<PackageVersionPair> packageVersions, string pathToSolution, bool isIncremental = false, bool incrementalRefresh = false)
         {
-            if (!packageVersions.Any())
+            if (packageVersions.Count == 0)
             {
                 _logger.LogInformation("No package version compatibilities to process.");
                 return;
@@ -86,7 +86,7 @@ namespace PortingAssistant.Client.NuGet
                                 }
                             }
                             else
-                            {  
+                            {
                                 exceptions.TryAdd(result.Key, task.Exception);
                             }
                         });
@@ -103,14 +103,14 @@ namespace PortingAssistant.Client.NuGet
                 if (packageVersion != null && _compatibilityTaskCompletionSources.TryGetValue(packageVersion, out var packageVersionPairResult))
                 {
                     var defaultErrorMessage = $"Could not find package {packageVersion} in all sources. Compatibility task status: {packageVersionPairResult.Task.Status}.";
-                    
+
                     if (exceptions.TryGetValue(packageVersion, out var exception))
                     {
-                        var newException = new PortingAssistantClientException(defaultErrorMessage, 
-                            (exception.InnerException is PortingAssistantClientException) ? null: exception.InnerException);
+                        var newException = new PortingAssistantClientException(defaultErrorMessage,
+                            (exception.InnerException is PortingAssistantClientException) ? null : exception.InnerException);
                         packageVersionPairResult.TrySetException(newException);
                     }
-                    else 
+                    else
                     {
                         var defaultException = new PortingAssistantClientException(ExceptionMessage.PackageNotFound(packageVersion), new PackageNotFoundException(defaultErrorMessage));
                         packageVersionPairResult.TrySetException(defaultException);
@@ -120,6 +120,15 @@ namespace PortingAssistant.Client.NuGet
                 {
                     _logger.LogInformation($"Attempted to get package {packageVersion} from compatibility tasks but it was not found.");
                 }
+            }
+        }
+
+        public void Dispose()
+        {
+            if (_compatibilityTaskCompletionSources != null)
+            {
+                _compatibilityTaskCompletionSources.Clear();
+
             }
         }
     }
