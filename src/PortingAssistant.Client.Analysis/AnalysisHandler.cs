@@ -312,7 +312,7 @@ namespace PortingAssistant.Client.Analysis
                         PortProject = false
                     };
                     //var projectResult = await solutionPort.RunProject(result, projectConfiguration);
-                    var analyzeActions =
+                    var analyzeActions = await 
                         AnalyzeProjectActions(new AnalyzeActionsRequest(projectPath, targetFramework, result, solutionFilename, projectConfiguration));
                     var analysisResult = AnalyzeProject(projectPath, solutionFilename, result, analyzeActions, isIncremental: true, targetFramework);
                     result?.Dispose();
@@ -326,21 +326,28 @@ namespace PortingAssistant.Client.Analysis
             }
         }
 
-        private ProjectResult AnalyzeProjectActions(AnalyzeActionsRequest analyzeActionsRequest)
+        private async Task<ProjectResult> AnalyzeProjectActions(AnalyzeActionsRequest analyzeActionsRequest)
         {
             _logger.LogInformation("Memory Consumption before AnalyzeActions: ");
             MemoryUtils.LogMemoryConsumption(_logger);
             var projectPort = new ProjectPort(analyzeActionsRequest.AnalyzerResult,
                 analyzeActionsRequest.PortCoreConfiguration, _httpService);
-            var projectResult = projectPort.Run();
+            await projectPort.Initialize;
+            if (projectPort.Initiated)
+            {
+                var projectResult = projectPort.Run();
+                _logger.LogInformation("Memory Consumption after AnalyzeActions: ");
+                MemoryUtils.LogMemoryConsumption(_logger);
+                return projectResult;
+            }
 
             //var solutionPort = new SolutionPort(analyzeActionsRequest.PathToSolution, analyzerResults, configs, _logger);
             //var projectResults = solutionPort.Run().ProjectResults.ToList();
 
             _logger.LogInformation("Memory Consumption after AnalyzeActions: ");
             MemoryUtils.LogMemoryConsumption(_logger);
+            throw new ApplicationException($"Could not initiate ProjectPort for {analyzeActionsRequest.PathToProject}");
 
-            return projectResult;
         }
 
         private ProjectAnalysisResult AnalyzeProject(
